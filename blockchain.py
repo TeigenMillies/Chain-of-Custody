@@ -26,12 +26,11 @@ class Block: #Block class to show every data/info for a block in the chain
         block_info = f"{self.prev_hash}{self.timestamp}{self.case_id}{self.evidence_id}{self.state}{self.creator}{self.owner}{self.data}{self.data_length}".encode('utf-8')
         return hashlib.sha256(block_info).hexdigest()
 
-
 # Blockchain class to handle all operations of blockchain
-class Blockchain: #sanity check
+class Blockchain: #sanity check function
     def __init__(self):
         self.chain = []
-        self.generate_genesis_block()
+        self.generate_genesis_block() #calls to generate the first block
 
     def generate_genesis_block(self):
         #Creates the first block
@@ -42,18 +41,18 @@ class Blockchain: #sanity check
             evidence_id=self.encrypt_data("0" * 32),  
             state="INITIAL", 
             creator="0" * 12,  #padded with 12 zeros
-            owner="0" * 12,  
+            owner="0" * 12,  #same padding done before
             data="Initial block",
             data_length=14  # Length of the data
         )
-        self.chain.append(genesis_block)
+        self.chain.append(genesis_block) #appends the block after it is generated
 
     def encrypt_data(self, data): #encryption Function
-        cipher = AES.new(AES_KEY, AES.MODE_ECB)
+        cipher = AES.new(AES_KEY, AES.MODE_ECB) #parameter for new AES key
         return cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
 
     def decrypt_data(self, encrypted_data): #decryption function
-        cipher = AES.new(AES_KEY, AES.MODE_ECB)
+        cipher = AES.new(AES_KEY, AES.MODE_ECB) #parameter for new AES key
         decrypted = unpad(cipher.decrypt(encrypted_data), AES.block_size).decode('utf-8')
         return decrypted
 
@@ -78,9 +77,9 @@ class Blockchain: #sanity check
         cases = set()
         for block in self.chain: #for loop is used to ensure all cases are shown
             case_id = self.decrypt_data(block.case_id)
-            cases.add(case_id)
+            cases.add(case_id) #adds the case_id for showcase
         for case_id in cases:
-            print(f"Case ID: {case_id}")
+            print(f"Case ID: {case_id}") #prints the case_id
 
     def show_items(self, case_id): #same as above but for the items in the chain
         print(f"Items for Case {case_id}:")
@@ -94,14 +93,13 @@ class Blockchain: #sanity check
         if password not in valid_passwords: #returns false if password doesn't match
             print(f"Invalid password or you don't have permission to perform this command.")
             return False
-        return True
+        return True #returns if password is valid
 
     def checkin(self, evidence_id, case_id, password):
         for block in self.chain:
             if block.evidence_id == self.encrypt_data(str(evidence_id)) and block.state == "CHECKEDOUT":
                 if not self.validate_password(password, block):
                     return
-
                 #Adds check-in block if password is validated
                 self.add_block(
                     case_id=case_id,
@@ -109,11 +107,11 @@ class Blockchain: #sanity check
                     state="CHECKEDIN",
                     creator=block.creator,
                     owner=block.owner,
-                    data="Evidence checked in"
+                    data="Evidence was checked in"
                 )
                 print(f"Item {evidence_id} has been checked in.")
                 return
-        print(f"Item can not be found or not in CHECKEDOUT state.")
+        print(f"Item can not be found or not in CHECKEDOUT state.") #prints if item was not found
 
     def checkout(self, evidence_id, case_id, password):
         for block in self.chain:
