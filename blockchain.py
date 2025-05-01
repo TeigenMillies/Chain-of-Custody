@@ -1,230 +1,270 @@
-import argparse #for parsing arguments
-import uuid
-import hashlib
-import time
-from Crypto.Cipher import AES #for encryption and decryption
-from Crypto.Util.Padding import pad, unpad #padding for hash
 import os
+import struct
+import time
+import hashlib
+from Crypto.Cipher import AES
 
+# Password roles loaded via env
+CREATOR_PW = os.getenv('BCHOC_PASSWORD_CREATOR')
+OWNERS_PW = [
+    os.getenv('BCHOC_PASSWORD_CREATOR'),
+    os.getenv('BCHOC_PASSWORD_LAWYER'),
+    os.getenv('BCHOC_PASSWORD_POLICE'),
+    os.getenv('BCHOC_PASSWORD_ANALYST'),
+    os.getenv('BCHOC_PASSWORD_EXECUTIVE'),
+]
+
+# Little-endian, no padding between fields; timestamp as IEEE 754 double
+HEADER_FMT = '<32sd32s32s12s12s12sI'
+HEADER_SIZE = struct.calcsize(HEADER_FMT)
+
+# AES key for ECB encryption (ASCII bytes)
 AES_KEY = b"R0chLi4uLi4uLi4="
 
-class Block: #Block class to show every data/info for a block in the chain
-    def __init__(self, prev_hash, timestamp, case_id, evidence_id, state, creator, owner, data, data_length): #initalizing all parameters in the block
+
+def pad_bytes(b: bytes, length: int) -> bytes:
+    if len(b) > length:
+        return b[:length]
+    return b + b'\x00' * (length - len(b))
+
+
+class Block:
+    def __init__(self, prev_hash, timestamp, case_id, evidence_id,
+                 state, creator, owner, data):
         self.prev_hash = prev_hash
         self.timestamp = timestamp
-        self.case_id = case_id
+        self.case_id = case_id      # raw ID (hex string for case, decimal string for evidence)
         self.evidence_id = evidence_id
         self.state = state
         self.creator = creator
-        self.owner = owner
-        self.data = data
-        self.data_length = data_length
-        self.hash = self.hash_calculate()
+        self.owner = owner or ''
+        # Data handling: no extra data for normal operations
+        self.data = data or ''
+        # D_length: include null only if data present
+        if self.data:
+            self.data_length = len(self.data.encode()) + 1
+        else:
+            self.data_length = 0
 
-    def hash_calculate(self):
-        #retrives data from the block and calculates the hash in hex, then returns it
-        block_info = f"{self.prev_hash}{self.timestamp}{self.case_id}{self.evidence_id}{self.state}{self.creator}{self.owner}{self.data}{self.data_length}".encode('utf-8')
-        return hashlib.sha256(block_info).hexdigest()
-
-# Blockchain class to handle all operations of blockchain
-class Blockchain: #sanity check function
-    def __init__(self):
-        self.chain = []
-        self.generate_genesis_block() #calls to generate the first block
-
-    def generate_genesis_block(self):
-        #Creates the first block
-        genesis_block = Block(
-            prev_hash="0" * 64,  #Genesis block has no previous hash so default to 64 bytes
-            timestamp=int(time.time()),
-            case_id=self.encrypt_data("0" * 32),  #Encrypt case ID (UUID), default to 32 bytes
-            evidence_id=self.encrypt_data("0" * 32),  
-            state="INITIAL", 
-            creator="0" * 12,  #padded with 12 zeros
-            owner="0" * 12,  #same padding done before
-            data="Initial block",
-            data_length=14  # Length of the data
+    def pack(self) -> bytes:
+        cipher = AES.new(AES_KEY, AES.MODE_ECB)
+        # Case ID field
+        if self.state == 'INITIAL':
+            case_src = self.case_id.encode()
+            case_bytes = pad_bytes(case_src, 32)
+        else:
+            case_hex = self.case_id.replace('-', '')
+            raw_case = bytes.fromhex(case_hex)
+            enc_case = cipher.encrypt(raw_case)
+            enc_hex = enc_case.hex().encode()
+            case_bytes = pad_bytes(enc_hex, 32)
+        # Evidence ID field
+        if self.state == 'INITIAL':
+            evid_src = self.evidence_id.encode()
+            evid_bytes = pad_bytes(evid_src, 32)
+        else:
+            ev_int = int(self.evidence_id)
+            raw_evi = b'\x00' * 12 + struct.pack('>I', ev_int)
+            enc_evi = cipher.encrypt(raw_evi)
+            enc_hex = enc_evi.hex().encode()
+            evid_bytes = pad_bytes(enc_hex, 32)
+        state_bytes = pad_bytes(self.state.encode(), 12)
+        creator_bytes = pad_bytes(self.creator.encode(), 12)
+        owner_bytes = pad_bytes(self.owner.encode(), 12)
+        if self.data_length > 0:
+            data_bytes = self.data.encode() + b'\x00'
+        else:
+            data_bytes = b''
+        header = struct.pack(
+            HEADER_FMT,
+            self.prev_hash,
+            float(self.timestamp),
+            case_bytes,
+            evid_bytes,
+            state_bytes,
+            creator_bytes,
+            owner_bytes,
+            self.data_length
         )
-        self.chain.append(genesis_block) #appends the block after it is generated
+        return header + data_bytes
 
-    def encrypt_data(self, data): #encryption Function
-        cipher = AES.new(AES_KEY, AES.MODE_ECB) #parameter for new AES key
-        return cipher.encrypt(pad(data.encode('utf-8'), AES.block_size))
+    @classmethod
+    def unpack(cls, buf: bytes) -> 'Block':
+        hdr = buf[:HEADER_SIZE]
+        fields = struct.unpack(HEADER_FMT, hdr)
+        prev_hash = fields[0]
+        timestamp = fields[1]
+        case_bytes = fields[2]
+        evid_bytes = fields[3]
+        state_bytes = fields[4]
+        creator_bytes = fields[5]
+        owner_bytes = fields[6]
+        data_length = fields[7]
+        data_bytes = buf[HEADER_SIZE:HEADER_SIZE + data_length]
+        raw_case_hex = case_bytes.rstrip(b'\x00')
+        raw_evid_hex = evid_bytes.rstrip(b'\x00')
+        state = state_bytes.rstrip(b'\x00').decode()
+        creator = creator_bytes.rstrip(b'\x00').decode()
+        owner = owner_bytes.rstrip(b'\x00').decode()
+        data = data_bytes.rstrip(b'\x00').decode()
+        if state == 'INITIAL':
+            case_id = raw_case_hex.decode()
+            evidence_id = raw_evid_hex.decode()
+        else:
+            cipher = AES.new(AES_KEY, AES.MODE_ECB)
+            enc_case = bytes.fromhex(raw_case_hex.decode())
+            dec_case = cipher.decrypt(enc_case)
+            case_id = dec_case.hex()
+            enc_evi = bytes.fromhex(raw_evid_hex.decode())
+            dec_evi = cipher.decrypt(enc_evi)
+            ev_int = struct.unpack('>I', dec_evi[-4:])[0]
+            evidence_id = str(ev_int)
+        return cls(prev_hash, timestamp, case_id, evidence_id,
+                   state, creator, owner, data)
 
-    def decrypt_data(self, encrypted_data): #decryption function
-        cipher = AES.new(AES_KEY, AES.MODE_ECB) #parameter for new AES key
-        decrypted = unpad(cipher.decrypt(encrypted_data), AES.block_size).decode('utf-8')
-        return decrypted
 
-    def add(self, case_id, evidence_id, state, creator, owner, data): #adds new block in the chain
-        prev_block = self.chain[-1] #Redirects from previous block
+class Blockchain:
+    def __init__(self, path: str):
+        self.path = path
+        self.chain = []
+        if os.path.exists(self.path):
+            self.load()
+
+    def create_genesis(self) -> Block:
+        zero32 = '0' * 32
+        genesis = Block(
+            prev_hash=b'\x00' * 32,
+            timestamp=time.time(),
+            case_id=zero32,
+            evidence_id=zero32,
+            state='INITIAL',
+            creator='',
+            owner='',
+            data='Initial block'
+        )
+        self.chain = [genesis]
+        return genesis
+
+    def load(self) -> None:
+        with open(self.path, 'rb') as f:
+            raw = f.read()
+        offset = 0
+        self.chain = []
+        while offset + HEADER_SIZE <= len(raw):
+            hdr = raw[offset:offset + HEADER_SIZE]
+            data_length = struct.unpack(HEADER_FMT, hdr)[7]
+            block_buf = raw[offset:offset + HEADER_SIZE + data_length]
+            blk = Block.unpack(block_buf)
+            self.chain.append(blk)
+            offset += HEADER_SIZE + data_length
+
+    def save(self) -> None:
+        with open(self.path, 'wb') as f:
+            for blk in self.chain:
+                f.write(blk.pack())
+
+    def exists(self, evidence_id) -> bool:
+        key = str(evidence_id)
+        return any(b.evidence_id == key for b in self.chain)
+
+    def add(self, case_id, evidence_id, state, creator, owner, data) -> Block:
+        case_hex = case_id.replace('-', '')
+        if not self.chain:
+            self.create_genesis()
+        prev = self.chain[-1]
         new_block = Block(
-            #Each parameter is set to itself when a new block with new data is added in the chain
-            prev_hash=prev_block.hash,
-            timestamp=int(time.time()),
-            case_id=self.encrypt_data(case_id),
-            evidence_id=self.encrypt_data(str(evidence_id)),
+            prev_hash=hashlib.sha256(prev.pack()).digest(),
+            timestamp=time.time(),
+            case_id=case_hex,
+            evidence_id=str(evidence_id),
             state=state,
             creator=creator,
-            owner=owner,
-            data=data,
-            data_length=len(data)
+            owner='',
+            data=''
         )
-        self.chain.append(new_block) #data is appened after being added
+        self.chain.append(new_block)
+        return new_block
 
-    def show_cases(self):
-        print("List of every cases:")
-        cases = set()
-        for block in self.chain: #for loop is used to ensure all cases are shown
-            case_id = self.decrypt_data(block.case_id)
-            cases.add(case_id) #adds the case_id for showcase
-        for case_id in cases:
-            print(f"Case ID: {case_id}") #prints the case_id
+    def checkout(self, evidence_id, password):
+        key = str(evidence_id)
+        blk = next((b for b in reversed(self.chain) if b.evidence_id == key), None)
+        if not blk or blk.state != 'CHECKEDIN':
+            raise Exception("Cannot checkout: not in CHECKEDIN state or not found.")
+        if password not in OWNERS_PW:
+            raise Exception("Invalid password")
+        new = self.add(blk.case_id, key, 'CHECKEDOUT', blk.creator, '', '')
+        self.save()
+        return new
 
-    def show_items(self, case_id): #same as above but for the items in the chain
-        print(f"Items for Case {case_id}:")
-        for block in self.chain:
-            if self.decrypt_data(block.case_id) == case_id:
-                print(f"Evidence ID: {self.decrypt_data(block.evidence_id)}, State: {block.state}")
+    def checkin(self, evidence_id, password):
+        key = str(evidence_id)
+        blk = next((b for b in reversed(self.chain) if b.evidence_id == key), None)
+        if not blk or blk.state != 'CHECKEDOUT':
+            raise Exception("Cannot checkin: not in CHECKEDOUT state or not found.")
+        if password not in OWNERS_PW:
+            raise Exception("Invalid password")
+        new = self.add(blk.case_id, key, 'CHECKEDIN', blk.creator, '', '')
+        self.save()
+        return new
 
-    def validate_password(self, password, block):
-        #Checks if the password matches either the creator or the owner of the block/item
-        valid_passwords = [os.getenv(f'BCHOC_PASSWORD_{role.upper()}') for role in ['creator', 'owner']]
-        if password not in valid_passwords: #returns false if password doesn't match
-            print(f"Invalid password or you don't have permission to perform this command.")
+    def show_cases(self) -> list:
+        return sorted({blk.case_id for blk in self.chain[1:]})
+
+    def show_items(self, case_id) -> list:
+        latest = {}
+        for blk in self.chain:
+            if blk.case_id == case_id:
+                latest[blk.evidence_id] = blk.state
+        return sorted(latest.items())
+
+    def show_history(self, case_id=None, item_id=None, num_entries=None, reverse=False, password=None):
+        if password and password not in OWNERS_PW:
+            raise Exception("Invalid password")
+        key_case = case_id.replace('-', '') if case_id else None
+        key_item = str(item_id) if item_id else None
+        entries = []
+        for blk in self.chain:
+            if (key_case is None or blk.case_id == key_case) and (key_item is None or blk.evidence_id == key_item):
+                entries.append(f"{int(blk.timestamp)}\t{blk.state}")
+        if reverse:
+            entries = list(reversed(entries))
+        if num_entries is not None:
+            entries = entries[:num_entries]
+        return entries
+
+    def remove(self, evidence_id, reason, password, owner=None):
+        key = str(evidence_id)
+        blk = next((b for b in reversed(self.chain) if b.evidence_id == key), None)
+        if not blk:
+            raise Exception("Item not found.")
+        if blk.state != 'CHECKEDIN':
+            raise Exception("Cannot remove: item not CHECKEDIN")
+        if password != CREATOR_PW:
+            raise Exception("Invalid password")
+        new = self.add(blk.case_id, key, reason, blk.creator, owner or '', '')
+        self.save()
+        return new
+
+    def verify(self) -> bool:
+        if not self.chain or self.chain[0].timestamp != 0 or self.chain[0].prev_hash != b'\x00'*32:
             return False
-        return True #returns if password is valid
+        for prev_blk, curr_blk in zip(self.chain, self.chain[1:]):
+            if curr_blk.prev_hash != hashlib.sha256(prev_blk.pack()).digest():
+                return False
+        return True
 
-    def checkin(self, evidence_id, case_id, password):
-        for block in self.chain:
-            if block.evidence_id == self.encrypt_data(str(evidence_id)) and block.state == "CHECKEDOUT":
-                if not self.validate_password(password, block):
-                    return
-                #Adds check-in block if password is validated
-                self.add_block(
-                    case_id=case_id,
-                    evidence_id=evidence_id,
-                    state="CHECKEDIN",
-                    creator=block.creator,
-                    owner=block.owner,
-                    data="Evidence was checked in"
-                )
-                print(f"Item {evidence_id} has been checked in.")
-                return
-        print(f"Item can not be found or not in CHECKEDOUT state.") #prints if item was not found
-
-    def checkout(self, evidence_id, case_id, password):
-        for block in self.chain:
-            if block.evidence_id == self.encrypt_data(str(evidence_id)) and block.state == "CHECKEDIN":
-                if not self.validate_password(password, block):
-                    return
-
-                #Adds checkout block if password is validated
-                self.add_block(
-                    case_id=case_id,
-                    evidence_id=evidence_id,
-                    state="CHECKEDOUT",
-                    creator=block.creator,
-                    owner=block.owner,
-                    data="Evidence checked out"
-                )
-                print(f"Item {evidence_id} has been checked out.")
-                return
-        print(f"Item can not be found or not in CHECKEDIN state.")
-
-    def remove(self, evidence_id, password):
-        for block in self.chain:
-            if block.evidence_id == self.encrypt_data(str(evidence_id)):
-                if not self.validate_password(password, block):
-                    return
-
-                #Marks the evidence item as removed is password isn't validated
-                block.state = "REMOVED"
-                print(f"Item {evidence_id} was removed.")
-                return
-        print(f"Item {evidence_id} was not found.")
-
-    def verify(self):
-        print("Verifying the blockchain integrity...")
-        for i in range(1, len(self.chain)): #checks all cases in the chain for integrety of blockchain
-            prev_block = self.chain[i-1]
-            curr_block = self.chain[i]
-            #Checks to ensure the current block's previous hash matches the previous block's hash
-            if curr_block.prev_hash != prev_block.hash:
-                print(f"Blockchain is corrupted at block {i}.")
-                return
-        print("Blockchain is verified and intact.") #prints of blockchain is not corrupted
-
-    def summary(self): #summarizes state of blockchain and it's states
-        state_counts = {"CHECKEDIN": 0, "CHECKEDOUT": 0, "REMOVED": 0, "INITIAL": 0}
-        unique_item_ids = set()
-        for block in self.chain:
-            state_counts[block.state] += 1
-            unique_item_ids.add(self.decrypt_data(block.evidence_id))
-
-        print("Blockchain Summary:")
-        print(f"Unique Item IDs: {len(unique_item_ids)}")
-        for state, count in state_counts.items():
-            print(f"State {state}: {count} items")
-
-
-#Command handling functions
-def handle_show_cases(args, blockchain):
-    blockchain.show_cases()
-
-def handle_show_items(args, blockchain):
-    blockchain.show_items(args.case_id)
-
-def handle_remove(args, blockchain):
-    blockchain.remove(args.item_id, args.password)
-
-def handle_verify(args, blockchain):
-    blockchain.verify()
-
-def handle_summary(args, blockchain):
-    blockchain.summary()
-
-
-# Argument parsing
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Blockchain Chain of Custody")
-    subparsers = parser.add_subparsers(help="Commands")
-
-    #Show Cases parser
-    show_cases_parser = subparsers.add_parser('show_cases', help="Show all cases in blockchain")
-    show_cases_parser.set_defaults(func=handle_show_cases)
-
-    #Show Items parser
-    show_items_parser = subparsers.add_parser('show_items', help="Show items for a case")
-    show_items_parser.add_argument('-c', '--case_id', required=True, help="Case ID")
-    show_items_parser.set_defaults(func=handle_show_items)
-
-    #Remove command parser
-    remove_parser = subparsers.add_parser('remove', help="Remove an item")
-    remove_parser.add_argument('-i', '--item_id', required=True, type=int, help="Item ID")
-    remove_parser.add_argument('-p', '--password', required=True, help="Password")
-    remove_parser.set_defaults(func=handle_remove)
-
-    #Verify Blockchain parser
-    verify_parser = subparsers.add_parser('verify', help="Verify blockchain integrity")
-    verify_parser.set_defaults(func=handle_verify)
-
-    #Summary command parser
-    summary_parser = subparsers.add_parser('summary', help="Show blockchain summary")
-    summary_parser.set_defaults(func=handle_summary)
-
-    return parser
-
-
-# Main function to parse arguments and call the appropriate function
-def main():
-    #calls the blockchain class, arguments, and parsers for handiling
-    blockchain = Blockchain()
-    parser = parse_arguments()
-    args = parser.parse_args()
-    args.func(args, blockchain)
-
-
-if __name__ == "__main__":
-    main()
-
+    def summary(self, case_id) -> list:
+        related = [b for b in self.chain if b.case_id == case_id.replace('-', '')]
+        unique_ids = set(b.evidence_id for b in related)
+        counts = {s: 0 for s in ['CHECKEDIN','CHECKEDOUT','DISPOSED','DESTROYED','RELEASED']}
+        for b in related:
+            if b.state in counts:
+                counts[b.state] += 1
+        return [
+            str(len(unique_ids)),
+            str(counts['CHECKEDIN']),
+            str(counts['CHECKEDOUT']),
+            str(counts['DISPOSED']),
+            str(counts['DESTROYED']),
+            str(counts['RELEASED']),
+        ]
